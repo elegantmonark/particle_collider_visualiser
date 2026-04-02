@@ -1,0 +1,552 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Collider Viz - Particle Collision Event Display</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+</head>
+<body>
+
+<div class="app">
+    <header class="header">
+        <div class="header-brand">
+            <span class="logo">COLLIDER VIZ</span>
+            <span class="tagline">Particle Collision Event Display</span>
+        </div>
+        <div class="header-controls">
+            <select class="btn" id="event-type" onchange="loadEvent(this.value)">
+                <option value="">Random Event</option>
+                <option value="zpeak">Z Boson Decay</option>
+                <option value="higgs_4l">Higgs to 4 Leptons</option>
+                <option value="dimuon">Di-muon</option>
+                <option value="dielectron">Di-electron</option>
+                <option value="ttbar">Top Quark Pair</option>
+                <option value="qcd_jets">QCD Jets</option>
+            </select>
+            <button class="btn btn-primary" onclick="loadEvent()">New Event</button>
+            <button class="btn" onclick="toggleDetector()">Detector</button>
+            <button class="btn" onclick="toggleAutoRotate()">Auto-Rotate</button>
+            <button class="btn" onclick="resetCamera()">Reset View</button>
+        </div>
+    </header>
+
+    <div class="main">
+        <div class="viewport" id="viewport">
+            <div class="loading-overlay" id="loading">
+                <div class="loading-text">Generating collision event...</div>
+            </div>
+            <div class="viewport-overlay" id="viewport-info">
+                Drag to rotate | Scroll to zoom | Click particle to highlight
+            </div>
+            <div class="viewport-stats" id="viewport-stats"></div>
+            <div class="event-label" id="event-label"></div>
+        </div>
+
+        <aside class="panel">
+            <div class="panel-section">
+                <div class="panel-title">Event Summary</div>
+                <div id="event-info" style="font-family:var(--font-mono);font-size:10px;color:var(--text-dim);line-height:1.8;">
+                    Click "New Event" to generate a collision
+                </div>
+                <div id="event-narrative" style="font-family:var(--font-sans);font-size:11px;color:var(--text);line-height:1.6;margin-top:8px;display:none;"></div>
+            </div>
+
+            <!-- Particle detail card (appears on click) -->
+            <div class="panel-section" id="particle-detail" style="display:none;">
+                <div class="panel-title" style="display:flex;justify-content:space-between;align-items:center;">
+                    Selected Particle
+                    <button class="chip active" onclick="clearHighlight()" style="font-size:8px;">Clear</button>
+                </div>
+                <div id="particle-detail-content"></div>
+            </div>
+
+            <div class="panel-section">
+                <div class="panel-title">Energy Filter</div>
+                <div class="slider-row">
+                    <span>pT min</span>
+                    <input type="range" id="pt-filter" min="0" max="100" value="0" oninput="applyFilters()">
+                    <span class="slider-value" id="pt-value">0 GeV</span>
+                </div>
+            </div>
+
+            <div class="panel-section">
+                <div class="panel-title">Particle Filter</div>
+                <div class="filter-chips" id="filter-chips"></div>
+            </div>
+
+            <div class="panel-section" style="flex:1;overflow-y:auto;">
+                <div class="panel-title">Particles (<span id="particle-count">0</span>)</div>
+                <div id="particle-list"></div>
+            </div>
+
+            <div class="panel-section">
+                <div class="panel-title">Detector Layers</div>
+                <div id="detector-legend"></div>
+            </div>
+        </aside>
+    </div>
+</div>
+
+<script>
+// ===== THREE.JS SETUP =====
+let scene, camera, renderer, controls;
+let detectorGroup, tracksGroup, particleMeshes = [];
+let currentEvent = null;
+let showDetector = true;
+let activeFilters = new Set();
+let highlightedParticle = null;
+
+const DETECTOR_LAYERS = [
+    { name: 'Beam Pipe', r: 0.04, color: 0x444444, opacity: 0.3 },
+    { name: 'Tracker', r: 1.1, color: 0x1a3a5c, opacity: 0.06 },
+    { name: 'ECAL', r: 1.8, color: 0x2d5a1e, opacity: 0.05 },
+    { name: 'HCAL', r: 2.95, color: 0x5a3a1e, opacity: 0.04 },
+    { name: 'Solenoid', r: 3.0, color: 0x3a3a5a, opacity: 0.03 },
+    { name: 'Muon System', r: 7.4, color: 0x5a1a2a, opacity: 0.025 },
+];
+
+function initScene() {
+    const viewport = document.getElementById('viewport');
+    const w = viewport.clientWidth, h = viewport.clientHeight;
+
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x020408);
+    scene.fog = new THREE.FogExp2(0x020408, 0.02);
+
+    camera = new THREE.PerspectiveCamera(50, w / h, 0.01, 100);
+    camera.position.set(6, 4, 8);
+
+    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(w, h);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    viewport.insertBefore(renderer.domElement, viewport.firstChild);
+
+    controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+    controls.autoRotate = true;
+    controls.autoRotateSpeed = 0.5;
+    controls.minDistance = 1;
+    controls.maxDistance = 30;
+
+    // Lighting
+    const ambient = new THREE.AmbientLight(0x334466, 0.5);
+    scene.add(ambient);
+    const point = new THREE.PointLight(0x4488ff, 0.5, 50);
+    point.position.set(0, 10, 0);
+    scene.add(point);
+
+    // Beam line
+    const beamGeo = new THREE.CylinderGeometry(0.005, 0.005, 12, 8);
+    const beamMat = new THREE.MeshBasicMaterial({ color: 0x334466, transparent: true, opacity: 0.4 });
+    const beam = new THREE.Mesh(beamGeo, beamMat);
+    beam.rotation.x = Math.PI / 2;
+    scene.add(beam);
+
+    // Collision point glow
+    const glowGeo = new THREE.SphereGeometry(0.06, 16, 16);
+    const glowMat = new THREE.MeshBasicMaterial({ color: 0x3b82f6, transparent: true, opacity: 0.6 });
+    const glow = new THREE.Mesh(glowGeo, glowMat);
+    scene.add(glow);
+
+    // Grid
+    const grid = new THREE.GridHelper(20, 40, 0x111828, 0x0a0e18);
+    grid.position.y = -0.01;
+    scene.add(grid);
+
+    // Detector
+    detectorGroup = new THREE.Group();
+    scene.add(detectorGroup);
+    buildDetector();
+
+    // Tracks group
+    tracksGroup = new THREE.Group();
+    scene.add(tracksGroup);
+
+    // Raycaster for clicking
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+    renderer.domElement.addEventListener('click', (e) => {
+        const rect = renderer.domElement.getBoundingClientRect();
+        mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+        mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+        raycaster.setFromCamera(mouse, camera);
+        const hits = raycaster.intersectObjects(particleMeshes);
+        if (hits.length > 0) highlightParticle(hits[0].object.userData.particleIndex);
+        else clearHighlight();
+    });
+
+    window.addEventListener('resize', () => {
+        const w2 = viewport.clientWidth, h2 = viewport.clientHeight;
+        camera.aspect = w2 / h2;
+        camera.updateProjectionMatrix();
+        renderer.setSize(w2, h2);
+    });
+
+    buildLegend();
+    buildFilterChips();
+    animate();
+}
+
+function buildDetector() {
+    detectorGroup.clear();
+    DETECTOR_LAYERS.forEach(layer => {
+        if (layer.r < 0.1) return; // Skip beam pipe visual
+        const geo = new THREE.CylinderGeometry(layer.r, layer.r, 5.5 * 2 * (layer.r < 3 ? 1 : 0.8), 32, 1, true);
+        const mat = new THREE.MeshBasicMaterial({
+            color: layer.color, transparent: true, opacity: layer.opacity,
+            side: THREE.DoubleSide, wireframe: layer.r > 3,
+        });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.rotation.x = Math.PI / 2;
+        detectorGroup.add(mesh);
+
+        // End caps
+        if (layer.r > 1) {
+            const capGeo = new THREE.RingGeometry(0.04, layer.r, 32);
+            const capMat = new THREE.MeshBasicMaterial({
+                color: layer.color, transparent: true, opacity: layer.opacity * 0.5, side: THREE.DoubleSide,
+            });
+            const zOff = 5.5 * (layer.r < 3 ? 1 : 0.8);
+            const cap1 = new THREE.Mesh(capGeo, capMat); cap1.position.z = zOff; detectorGroup.add(cap1);
+            const cap2 = new THREE.Mesh(capGeo, capMat); cap2.position.z = -zOff; detectorGroup.add(cap2);
+        }
+    });
+}
+
+function buildLegend() {
+    const el = document.getElementById('detector-legend');
+    el.innerHTML = '';
+    DETECTOR_LAYERS.forEach(l => {
+        if (l.r < 0.1) return;
+        const d = document.createElement('div'); d.className = 'detector-layer';
+        d.innerHTML = `<div class="detector-swatch" style="background:#${l.color.toString(16).padStart(6,'0')}"></div>
+            <span>${l.name} (r=${l.r}m)</span>`;
+        el.appendChild(d);
+    });
+}
+
+function buildFilterChips() {
+    const el = document.getElementById('filter-chips');
+    const types = [
+        { key: 'leptons', label: 'Leptons', match: ['electron','positron','muon','antimuon'] },
+        { key: 'photons', label: 'Photons', match: ['photon'] },
+        { key: 'hadrons', label: 'Hadrons', match: ['pion+','pion-','pion0','kaon+','kaon-','proton','antiproton'] },
+        { key: 'charged', label: 'Charged', match: null },
+        { key: 'neutral', label: 'Neutral', match: null },
+    ];
+    types.forEach(t => {
+        const chip = document.createElement('button');
+        chip.className = 'chip active'; chip.textContent = t.label;
+        chip.dataset.key = t.key;
+        chip.onclick = () => { chip.classList.toggle('active'); applyFilters(); };
+        el.appendChild(chip);
+    });
+}
+
+// ===== ANIMATION =====
+function animate() {
+    requestAnimationFrame(animate);
+    controls.update();
+    renderer.render(scene, camera);
+}
+
+// ===== EVENT LOADING =====
+async function loadEvent(type) {
+    document.getElementById('loading').style.display = 'flex';
+    const url = type ? `/api/event?type=${type}` : '/api/event';
+    try {
+        const res = await fetch(url);
+        currentEvent = await res.json();
+        renderEvent(currentEvent);
+    } catch (err) {
+        console.error(err);
+    }
+    document.getElementById('loading').style.display = 'none';
+}
+
+function renderEvent(ev) {
+    // Clear old tracks
+    while (tracksGroup.children.length) tracksGroup.remove(tracksGroup.children[0]);
+    particleMeshes = [];
+    highlightedParticle = null;
+
+    // Event label
+    document.getElementById('event-label').innerHTML = `
+        <div class="ev-type">${ev.label}</div>
+        <div class="ev-desc">${ev.description}</div>
+        <div class="ev-stats">Run ${ev.run} | Event ${ev.event} | sqrt(s) = ${ev.sqrt_s/1000} TeV</div>
+    `;
+
+    // Event info
+    document.getElementById('event-info').innerHTML = `
+        <div>Particles: <span style="color:var(--accent)">${ev.num_particles}</span></div>
+        <div>Total E: <span style="color:var(--accent)">${ev.total_energy.toFixed(1)} GeV</span></div>
+        <div>MET: <span style="color:var(--accent)">${ev.met.toFixed(1)} GeV</span></div>
+        <div>Type: <span style="color:var(--gold)">${ev.type}</span></div>
+    `;
+
+    // Render tracks
+    ev.particles.forEach((p, idx) => {
+        addTrack(p, idx);
+    });
+
+    applyFilters();
+    updateParticleList();
+    showEventNarrative(ev);
+    document.getElementById('particle-detail').style.display = 'none';
+    document.getElementById('viewport-stats').textContent =
+        `${ev.num_particles} particles | E_total = ${ev.total_energy.toFixed(1)} GeV | MET = ${ev.met.toFixed(1)} GeV`;
+}
+
+function addTrack(particle, index) {
+    const track = particle.track;
+    if (!track || track.length < 2) return;
+
+    const color = new THREE.Color(particle.color);
+
+    // Track line
+    const points = track.map(p => new THREE.Vector3(p[0], p[1], p[2]));
+    const curve = new THREE.CatmullRomCurve3(points);
+    const curvePoints = curve.getPoints(Math.max(track.length * 3, 30));
+    const geo = new THREE.BufferGeometry().setFromPoints(curvePoints);
+    const mat = new THREE.LineBasicMaterial({
+        color: color, transparent: true, opacity: 0.7,
+        linewidth: 1,
+    });
+    const line = new THREE.Line(geo, mat);
+    line.userData = { particleIndex: index, particleType: particle.type };
+    tracksGroup.add(line);
+
+    // Endpoint marker
+    const lastPt = track[track.length - 1];
+    const markerSize = Math.min(0.04 + particle.pt * 0.002, 0.15);
+    const markerGeo = new THREE.SphereGeometry(markerSize, 8, 8);
+    const markerMat = new THREE.MeshBasicMaterial({
+        color: color, transparent: true, opacity: 0.8,
+    });
+    const marker = new THREE.Mesh(markerGeo, markerMat);
+    marker.position.set(lastPt[0], lastPt[1], lastPt[2]);
+    marker.userData = { particleIndex: index, particleType: particle.type };
+    tracksGroup.add(marker);
+    particleMeshes.push(marker);
+
+    // Glow for high-energy particles
+    if (particle.pt > 20) {
+        const glowGeo = new THREE.SphereGeometry(markerSize * 2.5, 8, 8);
+        const glowMat = new THREE.MeshBasicMaterial({
+            color: color, transparent: true, opacity: 0.15,
+        });
+        const glowMesh = new THREE.Mesh(glowGeo, glowMat);
+        glowMesh.position.copy(marker.position);
+        tracksGroup.add(glowMesh);
+    }
+}
+
+// ===== FILTERS =====
+function applyFilters() {
+    if (!currentEvent) return;
+    const ptMin = parseFloat(document.getElementById('pt-filter').value);
+    document.getElementById('pt-value').textContent = ptMin + ' GeV';
+
+    // Get active chip filters
+    const chips = document.querySelectorAll('.chip');
+    const active = {};
+    chips.forEach(c => { active[c.dataset.key] = c.classList.contains('active'); });
+
+    let visibleCount = 0;
+    currentEvent.particles.forEach((p, idx) => {
+        let visible = true;
+
+        // pT filter
+        if (p.pt < ptMin) visible = false;
+
+        // Type filter
+        if (visible) {
+            const isLepton = ['electron','positron','muon','antimuon'].includes(p.type);
+            const isPhoton = p.type === 'photon';
+            const isHadron = ['pion+','pion-','pion0','kaon+','kaon-','proton','antiproton'].includes(p.type);
+            const isCharged = p.charge !== 0;
+
+            if (isLepton && !active.leptons) visible = false;
+            if (isPhoton && !active.photons) visible = false;
+            if (isHadron && !active.hadrons) visible = false;
+            if (isCharged && !active.charged) visible = false;
+            if (!isCharged && !active.neutral) visible = false;
+        }
+
+        // Apply visibility to track objects
+        tracksGroup.children.forEach(child => {
+            if (child.userData.particleIndex === idx) {
+                child.visible = visible;
+            }
+        });
+
+        if (visible) visibleCount++;
+    });
+
+    document.getElementById('particle-count').textContent = visibleCount;
+    updateParticleList();
+}
+
+function updateParticleList() {
+    const list = document.getElementById('particle-list');
+    list.innerHTML = '';
+    if (!currentEvent) return;
+
+    // Sort by pT descending
+    const sorted = currentEvent.particles
+        .map((p, i) => ({ ...p, idx: i }))
+        .filter(p => {
+            const obj = tracksGroup.children.find(c => c.userData.particleIndex === p.idx);
+            return obj ? obj.visible : false;
+        })
+        .sort((a, b) => b.pt - a.pt);
+
+    sorted.forEach(p => {
+        const item = document.createElement('div');
+        item.className = 'particle-item' + (highlightedParticle === p.idx ? ' highlighted' : '');
+        item.innerHTML = `
+            <div class="particle-dot" style="color:${p.color};background:${p.color}"></div>
+            <div class="particle-info">
+                <div class="particle-name">${p.symbol}</div>
+                <div class="particle-data">pT=${p.pt.toFixed(1)} GeV | E=${p.energy.toFixed(1)} GeV | q=${p.charge > 0 ? '+' : ''}${p.charge}</div>
+            </div>
+        `;
+        item.onclick = () => highlightParticle(p.idx);
+        list.appendChild(item);
+    });
+}
+
+function highlightParticle(idx) {
+    clearHighlight();
+    highlightedParticle = idx;
+
+    tracksGroup.children.forEach(child => {
+        if (child.userData.particleIndex === idx) {
+            if (child.material) {
+                child.material._origOpacity = child.material.opacity;
+                child.material.opacity = 1;
+                if (child.isLine) child.material.linewidth = 3;
+            }
+        } else {
+            if (child.material && child.material.opacity > 0.02) {
+                child.material._origOpacity = child.material.opacity;
+                child.material.opacity *= 0.15;
+            }
+        }
+    });
+    showParticleDetail(idx);
+    updateParticleList();
+}
+
+function clearHighlight() {
+    highlightedParticle = null;
+    tracksGroup.children.forEach(child => {
+        if (child.material && child.material._origOpacity !== undefined) {
+            child.material.opacity = child.material._origOpacity;
+            delete child.material._origOpacity;
+        }
+    });
+    document.getElementById('particle-detail').style.display = 'none';
+    updateParticleList();
+}
+
+// ===== PARTICLE DETAIL & PHYSICS DESCRIPTIONS =====
+const PARTICLE_INFO = {
+    'electron':   { full: 'Electron (e\u207b)', desc: 'A fundamental lepton with negative charge. Leaves a curved track in the magnetic field and deposits all its energy in the electromagnetic calorimeter (ECAL). The track curves due to the 3.8T solenoid field - tighter curves mean lower momentum.' },
+    'positron':   { full: 'Positron (e\u207a)', desc: 'The antimatter partner of the electron. Same mass but positive charge, so it curves in the opposite direction. Annihilates with electrons, producing photons. Stops in the ECAL.' },
+    'muon':       { full: 'Muon (\u03bc\u207b)', desc: 'A heavy cousin of the electron, 207x more massive. Muons are the only charged particles that pass through the entire detector - they punch through the calorimeters and reach the outer muon chambers. This makes them easy to identify and crucial for many discoveries, including the Higgs boson.' },
+    'antimuon':   { full: 'Antimuon (\u03bc\u207a)', desc: 'The antimatter partner of the muon. Same penetrating behavior but curves opposite in the magnetic field. Muon pairs are a clean signature of Z boson and Higgs boson decays.' },
+    'photon':     { full: 'Photon (\u03b3)', desc: 'A massless, chargeless particle of light. Travels in a straight line (no magnetic deflection) and converts all its energy into an electromagnetic shower in the ECAL. Photon pairs were key to discovering the Higgs boson in the H\u2192\u03b3\u03b3 channel.' },
+    'pion+':      { full: 'Pion (\u03c0\u207a)', desc: 'The lightest hadron (quark-antiquark pair). Pions are the most common particles produced in proton-proton collisions. Charged pions curve in the magnetic field and deposit energy in the hadronic calorimeter (HCAL). They are the main component of jets.' },
+    'pion-':      { full: 'Pion (\u03c0\u207b)', desc: 'Negatively charged pion - same mass as \u03c0\u207a but opposite charge. Curves the other way in the magnetic field. Abundant in jets from quark and gluon fragmentation.' },
+    'pion0':      { full: 'Neutral Pion (\u03c0\u2070)', desc: 'Electrically neutral pion that decays almost instantly into two photons (\u03c0\u2070 \u2192 \u03b3\u03b3). Travels in a straight line and deposits energy in the ECAL. Lifetime is only 8.4 \u00d7 10\u207b\u00b9\u2077 seconds.' },
+    'kaon+':      { full: 'Kaon (K\u207a)', desc: 'A heavier meson containing a strange quark. Kaons are produced in jets and have a longer lifetime than pions. Their presence indicates strangeness production in the collision, important for studying quark-gluon plasma.' },
+    'kaon-':      { full: 'Kaon (K\u207b)', desc: 'Negatively charged kaon with an anti-strange quark. Like K\u207a but opposite charge. Kaons can oscillate between matter and antimatter states - a key phenomenon in CP violation studies.' },
+    'proton':     { full: 'Proton (p)', desc: 'One of the colliding beam particles and also produced in fragmentation. The proton is a baryon made of two up quarks and one down quark. At the LHC, protons collide at 13 TeV center-of-mass energy.' },
+    'antiproton': { full: 'Antiproton (p\u0304)', desc: 'The antimatter partner of the proton. Produced in pairs with protons when enough energy is available. Would annihilate on contact with normal matter, releasing energy.' },
+    'neutrino':   { full: 'Neutrino (\u03bd)', desc: 'A ghostly particle that barely interacts with matter. Neutrinos pass through the entire detector without leaving any signal. Their presence is inferred from "missing transverse energy" (MET) - momentum imbalance in the event.' },
+};
+
+const EVENT_NARRATIVES = {
+    'dimuon': 'Two protons collided head-on at nearly the speed of light. A quark from one proton and an antiquark from the other annihilated, creating a virtual photon or Z boson that immediately decayed into a muon-antimuon pair. The two muons fly out back-to-back, leaving long curved tracks that penetrate the entire detector. The invariant mass of the pair tells us what particle they came from.',
+    'dielectron': 'In this collision, a quark-antiquark pair annihilated into a virtual photon or Z boson, which then decayed into an electron-positron pair. The electrons deposit all their energy in the electromagnetic calorimeter (ECAL), creating bright energy deposits. Their curved tracks in the tracker reveal their momenta.',
+    'zpeak': 'This is a textbook Z boson event. The Z boson (mass 91.2 GeV) was one of the key predictions of the electroweak theory and was discovered at CERN in 1983. It mediates the weak neutral current force. Here it decays into a lepton pair - the clean, back-to-back signature that makes Z bosons easy to identify.',
+    'higgs_4l': 'This is the "golden channel" - the decay that helped discover the Higgs boson in 2012. A Higgs boson (mass ~125 GeV) decayed into two Z bosons (one real, one virtual), which each decayed into a lepton pair. Four clean lepton tracks with invariant mass near 125 GeV is an extremely rare and distinctive signature. Only about 1 in 4 billion collisions produces this.',
+    'ttbar': 'A top quark pair was produced - the heaviest known fundamental particle (mass 173 GeV). One top decayed leptonically (t \u2192 Wb \u2192 l\u03bd b) producing a lepton, a neutrino (missing energy), and a b-quark jet. The other decayed hadronically into three jets. The complex multi-jet + lepton + MET topology is the signature of top physics.',
+    'qcd_jets': 'This is a QCD multijet event - the most common type of high-energy collision at the LHC. Quarks and gluons from the colliding protons scattered at large angles, producing sprays of hadrons called "jets." Each jet contains dozens of particles (mostly pions and kaons) all clustered in a narrow cone. These events form the background to nearly every search for new physics.',
+};
+
+function showParticleDetail(idx) {
+    if (!currentEvent) return;
+    const p = currentEvent.particles[idx];
+    const info = PARTICLE_INFO[p.type] || { full: p.symbol, desc: 'A particle produced in the collision.' };
+
+    const theta = 2 * Math.atan(Math.exp(-p.eta));
+    const thetaDeg = (theta * 180 / Math.PI).toFixed(1);
+    const phiDeg = (p.phi * 180 / Math.PI).toFixed(1);
+    const beta = p.energy > 0 ? Math.sqrt(p.px**2 + p.py**2 + p.pz**2) / p.energy : 0;
+    const gamma = beta < 1 ? 1 / Math.sqrt(1 - beta**2) : 'N/A';
+
+    const detail = document.getElementById('particle-detail');
+    detail.style.display = 'block';
+    document.getElementById('particle-detail-content').innerHTML = `
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+            <div style="width:14px;height:14px;border-radius:50%;background:${p.color};box-shadow:0 0 8px ${p.color};"></div>
+            <div style="font-family:var(--font-mono);font-size:14px;font-weight:700;color:${p.color};">${info.full}</div>
+        </div>
+        <div style="font-family:var(--font-sans);font-size:11px;color:var(--text);line-height:1.6;margin-bottom:10px;">
+            ${info.desc}
+        </div>
+        <div style="font-family:var(--font-mono);font-size:9px;color:var(--text-dim);line-height:1.8;">
+            <div>Transverse momentum: <span style="color:var(--accent)">${p.pt.toFixed(2)} GeV/c</span></div>
+            <div>Energy: <span style="color:var(--accent)">${p.energy.toFixed(2)} GeV</span></div>
+            <div>Mass: <span style="color:var(--accent)">${p.mass.toFixed(4)} GeV/c\u00b2</span></div>
+            <div>Charge: <span style="color:${p.charge > 0 ? 'var(--red)' : p.charge < 0 ? 'var(--accent)' : 'var(--text-dim)'}">${p.charge > 0 ? '+' : ''}${p.charge}</span></div>
+            <div>Pseudorapidity (\u03b7): <span style="color:var(--accent)">${p.eta.toFixed(3)}</span></div>
+            <div>Polar angle (\u03b8): <span style="color:var(--accent)">${thetaDeg}\u00b0</span></div>
+            <div>Azimuthal angle (\u03c6): <span style="color:var(--accent)">${phiDeg}\u00b0</span></div>
+            <div>Momentum (px,py,pz): <span style="color:var(--accent)">(${p.px.toFixed(2)}, ${p.py.toFixed(2)}, ${p.pz.toFixed(2)})</span></div>
+            <div>Speed (\u03b2c): <span style="color:var(--accent)">${beta.toFixed(5)}c</span></div>
+            <div>Lorentz factor (\u03b3): <span style="color:var(--accent)">${typeof gamma === 'number' ? gamma.toFixed(2) : gamma}</span></div>
+        </div>
+    `;
+}
+
+function showEventNarrative(ev) {
+    const narEl = document.getElementById('event-narrative');
+    const narrative = EVENT_NARRATIVES[ev.type];
+    if (narrative) {
+        narEl.textContent = narrative;
+        narEl.style.display = 'block';
+    } else {
+        narEl.style.display = 'none';
+    }
+}
+
+// ===== CONTROLS =====
+function toggleDetector() {
+    showDetector = !showDetector;
+    detectorGroup.visible = showDetector;
+}
+
+function toggleAutoRotate() {
+    controls.autoRotate = !controls.autoRotate;
+}
+
+function resetCamera() {
+    camera.position.set(6, 4, 8);
+    controls.target.set(0, 0, 0);
+    controls.update();
+}
+
+// ===== INIT =====
+initScene();
+loadEvent();
+</script>
+</body>
+</html>
