@@ -37,6 +37,8 @@ uvicorn main:app --reload
 
 Open [http://localhost:8000](http://localhost:8000) in your browser.
 
+**Live demo:** [https://particle-collider-visualiser.onrender.com](https://particle-collider-visualiser.onrender.com)
+
 > Requires Python 3.10+. If using Python 3.15 alpha, use `py -3.12 -m uvicorn main:app --reload` instead.
 
 ## Usage
