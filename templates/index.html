@@ -95,7 +95,7 @@
 let scene, camera, renderer, controls;
 let detectorGroup, tracksGroup, particleMeshes = [];
 let currentEvent = null;
-let showDetector = true;
+let showDetector = false;
 let activeFilters = new Set();
 let highlightedParticle = null;
 
@@ -161,6 +161,7 @@ function initScene() {
     detectorGroup = new THREE.Group();
     scene.add(detectorGroup);
     buildDetector();
+    detectorGroup.visible = false;
 
     // Tracks group
     tracksGroup = new THREE.Group();
