@@ -67,3 +67,6 @@ async def get_particles():
 async def get_detector():
     """Return detector geometry."""
     return {"detector": DETECTOR}
+
+
+
